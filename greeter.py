@@ -12,11 +12,53 @@ SetupPanel. Everything else lives here.
 
 from __future__ import annotations
 
+import re
+
 import discord
 
 import embeds
 
+try:  # optional - also turns :tada: style unicode shortcodes into 🎉
+    import emoji as _emoji_lib
+except ImportError:  # custom server emoji still work without it
+    _emoji_lib = None
+
 ACCENT = embeds.ACCENT.value
+
+_EMOJI_NAME = re.compile(r":([a-zA-Z0-9_]{2,32}):")
+
+
+def resolve_emojis(text, guild):
+    """Turn :name: shortcodes into things Discord actually renders.
+
+    A bot must send a custom emoji as <:name:id> - the bare :name: form only
+    works when a human types it in the client, otherwise it shows literally.
+    We look the name up in the guild's emoji (animated ones included), then,
+    if the optional `emoji` package is installed, fall back to standard
+    unicode shortcodes like :tada: -> 🎉.
+    """
+    if not text or ":" not in text:
+        return text
+
+    if guild is not None:
+        lookup = {e.name.lower(): str(e) for e in getattr(guild, "emojis", [])}
+        if lookup:
+            text = _EMOJI_NAME.sub(
+                lambda m: lookup.get(m.group(1).lower(), m.group(0)), text
+            )
+
+    if _emoji_lib is not None:
+        try:
+            text = _emoji_lib.emojize(text, language="alias")
+        except TypeError:
+            try:
+                text = _emoji_lib.emojize(text, use_aliases=True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    return text
 
 MODES = [
     ("embed_plain", "Embed · no header", "clean embed, no title on top"),
@@ -66,6 +108,16 @@ def clean_url(text):
     if low.startswith(("http://", "https://")):
         return value
     return None
+
+
+def _asset_label(value):
+    if not value:
+        return "none"
+    if value == "avatar":
+        return "their avatar"
+    if value == "server":
+        return "server icon"
+    return "custom url"
 
 
 class _PlainMessage(discord.ui.LayoutView):
@@ -142,7 +194,7 @@ class Feature:
             return text
         for key, value in self.tokens(member, guild, count).items():
             text = text.replace("{" + key + "}", str(value))
-        return text
+        return resolve_emojis(text, guild)
 
     def render_url(self, value, member, guild):
         if not value:
@@ -291,7 +343,6 @@ def _row(*items):
     return row
 
 
-# ---- button rows ------------------------------------------------------
 class EditRow(discord.ui.ActionRow):
     def __init__(self, panel):
         super().__init__()
@@ -300,6 +351,18 @@ class EditRow(discord.ui.ActionRow):
     @discord.ui.button(label="Message", style=discord.ButtonStyle.primary)
     async def message(self, interaction, button):
         await interaction.response.send_modal(MessageModal(self.panel))
+
+    @discord.ui.button(label="Images", style=discord.ButtonStyle.secondary)
+    async def images(self, interaction, button):
+        if self.panel.event.get("mode") == "text":
+            await interaction.response.send_message(
+                embed=embeds.notice(
+                    "plain text has no thumbnail or image - switch to an embed style first."
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(StyleModal(self.panel))
 
     @discord.ui.button(label="Options", style=discord.ButtonStyle.secondary)
     async def options(self, interaction, button):
@@ -345,7 +408,6 @@ class PowerRow(discord.ui.ActionRow):
         await self.panel.refresh(interaction)
 
 
-# ---- modals -----------------------------------------------------------
 class MessageModal(discord.ui.Modal):
     def __init__(self, panel):
         super().__init__(title=f"{panel.feature.label} message")
@@ -386,43 +448,51 @@ class MessageModal(discord.ui.Modal):
 
 class StyleModal(discord.ui.Modal):
     def __init__(self, panel):
-        super().__init__(title="Colour & images")
+        super().__init__(title="Thumbnail, image & colour")
         self.panel = panel
         event = panel.event
 
+        self.f_thumb = discord.ui.TextInput(
+            label="Thumbnail (small, top-right corner)",
+            default=event.get("thumbnail") or "",
+            placeholder="avatar · server · an image url · none",
+            required=False,
+        )
+        self.f_image = discord.ui.TextInput(
+            label="Image (large, across the bottom)",
+            default=event.get("image_url") or "",
+            placeholder="an image url · {avatar} · {server_icon} · none",
+            required=False,
+        )
         self.f_color = discord.ui.TextInput(
-            label="Colour hex",
-            default=f"{(event.get('color') if event.get('color') is not None else panel.feature.accent):06X}",
+            label="Colour hex (blank = default)",
+            default="" if event.get("color") is None else f"{event['color']:06X}",
             placeholder="2E1A47",
             max_length=7,
             required=False,
         )
-        self.f_image = discord.ui.TextInput(
-            label="Large image URL",
-            default=event.get("image_url") or "",
-            placeholder="https://... or {avatar} or {server_icon}",
-            required=False,
-        )
-        self.f_thumb = discord.ui.TextInput(
-            label="Thumbnail",
-            default=event.get("thumbnail") or "",
-            placeholder="avatar · server · a url · none",
-            required=False,
-        )
-        for item in (self.f_color, self.f_image, self.f_thumb):
+        for item in (self.f_thumb, self.f_image, self.f_color):
             self.add_item(item)
 
     async def on_submit(self, interaction):
         event = self.panel.event
-        event["color"] = parse_color(self.f_color.value, self.panel.feature.accent)
-        event["image_url"] = clean_url(self.f_image.value)
-        thumb = self.f_thumb.value.strip().lower()
-        event["thumbnail"] = None if thumb in {"", "none", "off"} else clean_url(self.f_thumb.value)
+
+        thumb = self.f_thumb.value.strip()
+        event["thumbnail"] = None if thumb.lower() in {"", "none", "off"} else clean_url(thumb)
+
+        image = self.f_image.value.strip()
+        event["image_url"] = None if image.lower() in {"", "none", "off"} else clean_url(image)
+
+        raw = self.f_color.value.strip()
+        if raw.lower() in {"", "none", "default"}:
+            event["color"] = None
+        else:
+            current = event["color"] if event.get("color") is not None else self.panel.feature.accent
+            event["color"] = parse_color(raw, current)
+
         await interaction.response.defer()
         await self.panel.refresh()
 
-
-# ---- options sub-panel (ephemeral) ------------------------------------
 class OptionsView(discord.ui.View):
     def __init__(self, panel):
         super().__init__(timeout=300)
@@ -431,7 +501,6 @@ class OptionsView(discord.ui.View):
         self.add_item(_ToggleButton("ping", "Ping", "notifies them", "silent"))
         for field, label, on, off in panel.feature.extra_toggles:
             self.add_item(_ToggleButton(field, label, on, off))
-        self.add_item(_StyleButton())
 
     async def interaction_check(self, interaction):
         return interaction.user.id == self.panel.author_id
@@ -459,20 +528,6 @@ class _ToggleButton(discord.ui.Button):
         await interaction.response.edit_message(content=view.blurb(), view=view)
 
 
-class _StyleButton(discord.ui.Button):
-    def __init__(self):
-        super().__init__(label="Colour & images", style=discord.ButtonStyle.primary)
-
-    async def callback(self, interaction):
-        if self.view.panel.event.get("mode") == "text":
-            await interaction.response.send_message(
-                embed=embeds.notice("plain text has no colour or images."), ephemeral=True
-            )
-            return
-        await interaction.response.send_modal(StyleModal(self.view.panel))
-
-
-# ---- the panel --------------------------------------------------------
 class SetupPanel(discord.ui.LayoutView):
     def __init__(self, feature, guild, author_id, kind, message=None):
         super().__init__(timeout=600)
@@ -494,6 +549,8 @@ class SetupPanel(discord.ui.LayoutView):
             f"**Channel** — {channel.mention if channel else 'not set'}",
             f"**Style** — {MODE_LABELS.get(event.get('mode'), '—')}",
             f"**Ping** — {'notifies them' if event.get('ping') else 'silent'}",
+            f"**Thumbnail** — {_asset_label(event.get('thumbnail'))}",
+            f"**Image** — {_asset_label(event.get('image_url'))}",
         ]
         for field, label, on, off in self.feature.extra_toggles:
             lines.append(f"**{label}** — {on if event.get(field) else off}")
