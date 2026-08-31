@@ -28,7 +28,14 @@ def get_cfg(guild_id):
 def ensure(guild_id):
     return config.setdefault(
         str(guild_id),
-        {"enabled": False, "keyword": None, "role_id": None, "channel_id": None},
+        {
+            "enabled": False,
+            "keyword": None,
+            "role_id": None,
+            "channel_id": None,
+            "status": True,
+            "tag": True,
+        },
     )
 
 
@@ -52,6 +59,14 @@ def custom_status(member: discord.Member) -> str:
         if isinstance(activity, discord.CustomActivity):
             return activity.name or ""
     return ""
+
+
+def wearing_tag(member: discord.Member) -> bool:
+    """True when the member is publicly displaying *this* server's tag."""
+    primary = getattr(member, "primary_guild", None)
+    if primary is None or not getattr(primary, "identity_enabled", False):
+        return False
+    return getattr(primary, "id", None) == member.guild.id
 
 
 def _row(*items):
@@ -119,7 +134,38 @@ class KeywordModal(discord.ui.Modal, title="Vanity keyword"):
         await self.panel.refresh()
 
 
-class Buttons(discord.ui.ActionRow):
+class DetectRow(discord.ui.ActionRow):
+    """The two ways to earn the role, each independently toggleable."""
+
+    def __init__(self, panel):
+        super().__init__()
+        self.panel = panel
+        cfg = panel.cfg()
+        status_on = cfg.get("status", True)
+        tag_on = cfg.get("tag", True)
+        self.status.label = f"Status: {'on' if status_on else 'off'}"
+        self.status.style = discord.ButtonStyle.success if status_on else discord.ButtonStyle.secondary
+        self.tag.label = f"Server tag: {'on' if tag_on else 'off'}"
+        self.tag.style = discord.ButtonStyle.success if tag_on else discord.ButtonStyle.secondary
+
+    @discord.ui.button(label="Keyword", style=discord.ButtonStyle.primary)
+    async def keyword(self, interaction, button):
+        await interaction.response.send_modal(KeywordModal(self.panel))
+
+    @discord.ui.button(label="Status", style=discord.ButtonStyle.success)
+    async def status(self, interaction, button):
+        cfg = self.panel.cfg()
+        cfg["status"] = not cfg.get("status", True)
+        await self.panel.refresh(interaction)
+
+    @discord.ui.button(label="Server tag", style=discord.ButtonStyle.success)
+    async def tag(self, interaction, button):
+        cfg = self.panel.cfg()
+        cfg["tag"] = not cfg.get("tag", True)
+        await self.panel.refresh(interaction)
+
+
+class ControlRow(discord.ui.ActionRow):
     def __init__(self, panel):
         super().__init__()
         self.panel = panel
@@ -127,22 +173,23 @@ class Buttons(discord.ui.ActionRow):
         self.toggle.label = "Turn off" if on else "Turn on"
         self.toggle.style = discord.ButtonStyle.danger if on else discord.ButtonStyle.success
 
-    @discord.ui.button(label="Keyword", style=discord.ButtonStyle.primary)
-    async def keyword(self, interaction, button):
-        await interaction.response.send_modal(KeywordModal(self.panel))
-
     @discord.ui.button(label="Turn on", style=discord.ButtonStyle.success)
     async def toggle(self, interaction, button):
         cfg = self.panel.cfg()
         if not cfg.get("enabled"):
-            missing = []
-            if not cfg.get("keyword"):
-                missing.append("a keyword")
+            problems = []
             if not cfg.get("role_id"):
-                missing.append("a role")
-            if missing:
+                problems.append("pick a role")
+            status_active = cfg.get("status", True) and bool(cfg.get("keyword"))
+            tag_active = cfg.get("tag", True)
+            if not (status_active or tag_active):
+                if cfg.get("status", True) and not cfg.get("keyword"):
+                    problems.append("set a keyword or turn on **Server tag**")
+                else:
+                    problems.append("turn on **Status** or **Server tag**")
+            if problems:
                 await interaction.response.send_message(
-                    embed=embeds.error("still needs: " + ", ".join(missing)), ephemeral=True
+                    embed=embeds.error("still needs: " + ", ".join(problems)), ephemeral=True
                 )
                 return
         cfg["enabled"] = not cfg.get("enabled")
@@ -172,18 +219,25 @@ class VanityPanel(discord.ui.LayoutView):
         role = self.guild.get_role(cfg["role_id"]) if cfg.get("role_id") else None
         channel = self.guild.get_channel(cfg["channel_id"]) if cfg.get("channel_id") else None
 
+        if cfg.get("status", True):
+            keyword = cfg.get("keyword")
+            status_line = f"on · `{keyword}`" if keyword else "on · keyword not set"
+        else:
+            status_line = "off"
+
         container = discord.ui.Container(accent_colour=ACCENT)
         container.add_item(discord.ui.TextDisplay("## Vanity role setup"))
         container.add_item(discord.ui.TextDisplay(
-            f"**Status** — {'on' if cfg.get('enabled') else 'off'}\n"
-            f"**Keyword** — {('`' + cfg['keyword'] + '`') if cfg.get('keyword') else 'not set'}\n"
+            f"**Enabled** — {'on' if cfg.get('enabled') else 'off'}\n"
+            f"**Status keyword** — {status_line}\n"
+            f"**Server tag** — {'on' if cfg.get('tag', True) else 'off'}\n"
             f"**Role** — {role.mention if role else 'not set'}\n"
             f"**Announce** — {channel.mention if channel else 'off'}"
         ))
         container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(
-            "-# members with the keyword in their **custom status** get the role, "
-            "and lose it when they take it out"
+            "-# members get the role while the keyword is in their **custom status** "
+            "or they're wearing this **server's tag**, and lose it when neither is true"
         ))
         self.add_item(container)
 
@@ -192,7 +246,8 @@ class VanityPanel(discord.ui.LayoutView):
 
         self.add_item(_row(RolePick(self)))
         self.add_item(_row(ChannelPick(self)))
-        self.add_item(Buttons(self))
+        self.add_item(DetectRow(self))
+        self.add_item(ControlRow(self))
 
     async def interaction_check(self, interaction):
         if interaction.user.id != self.author_id:
@@ -229,7 +284,7 @@ class VanityPanel(discord.ui.LayoutView):
 
 
 class Vanity(commands.Cog):
-    """Award a role for a keyword in someone's status."""
+    """Award a role for a keyword in someone's status or this server's tag."""
 
     def __init__(self, bot):
         self.bot = bot
@@ -246,33 +301,58 @@ class Vanity(commands.Cog):
         raise commands.MissingPermissions(["manage_roles"])
 
     async def sync_member(self, member: discord.Member):
-        if member.bot or member.status is discord.Status.offline:
+        if member.bot:
             return
         cfg = get_cfg(member.guild.id)
-        if not cfg or not cfg.get("enabled") or not cfg.get("keyword") or not cfg.get("role_id"):
+        if not cfg or not cfg.get("enabled") or not cfg.get("role_id"):
             return
         role = member.guild.get_role(cfg["role_id"])
         if not assignable(role, member.guild.me):
             return
 
-        should = cfg["keyword"].lower() in custom_status(member).lower()
+        keyword = cfg.get("keyword")
+        status_on = cfg.get("status", True) and bool(keyword)
+        tag_on = cfg.get("tag", True)
+        if not (status_on or tag_on):
+            return
+
+        wears_tag = tag_on and wearing_tag(member)
+
+        if member.status is discord.Status.offline:
+            # A custom status can't be read while offline, so only the server
+            # tag can decide. When the status keyword is the only active method
+            # we leave offline members untouched (as before) rather than churn.
+            if wears_tag:
+                should = True
+            elif not status_on:
+                should = False
+            else:
+                return
+        else:
+            in_status = status_on and keyword.lower() in custom_status(member).lower()
+            should = wears_tag or in_status
+
         has = role in member.roles
         try:
             if should and not has:
-                await member.add_roles(role, reason="vanity: keyword in status")
-                await self._announce(member, cfg)
+                await member.add_roles(role, reason="vanity: status keyword or server tag")
+                await self._announce(member, cfg, tag=wears_tag)
             elif not should and has:
-                await member.remove_roles(role, reason="vanity: keyword gone")
+                await member.remove_roles(role, reason="vanity: no longer repping")
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-    async def _announce(self, member, cfg):
+    async def _announce(self, member, cfg, *, tag=False):
         channel = member.guild.get_channel(cfg.get("channel_id")) if cfg.get("channel_id") else None
         if channel is None:
             return
+        if tag:
+            text = f"{member.mention} is repping the **server tag** — role granted."
+        else:
+            text = f"{member.mention} is repping **{cfg['keyword']}** — role granted."
         try:
             await channel.send(
-                f"{member.mention} is repping **{cfg['keyword']}** — role granted.",
+                text,
                 allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
         except (discord.Forbidden, discord.HTTPException):
@@ -283,6 +363,15 @@ class Vanity(commands.Cog):
         if after.guild is None:
             return
         if custom_status(before) == custom_status(after):
+            return
+        await self.sync_member(after)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        # Server tag changes arrive through GUILD_MEMBER_UPDATE; only act when
+        # the "wearing this server's tag" state actually flipped (this also
+        # keeps our own role edits from re-triggering a sync).
+        if wearing_tag(before) == wearing_tag(after):
             return
         await self.sync_member(after)
 
