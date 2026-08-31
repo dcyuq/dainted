@@ -12,7 +12,6 @@ log = logging.getLogger(__name__)
 
 EVENTS = [("boost", "Booster", "when someone boosts")]
 
-# The system messages Discord posts when someone boosts.
 BOOST_TYPES = {
     discord.MessageType.premium_guild_subscription,
     discord.MessageType.premium_guild_tier_1,
@@ -76,7 +75,6 @@ class Booster(commands.Cog):
             return True
         raise commands.MissingPermissions(["manage_guild"])
 
-    # ---- events -------------------------------------------------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.guild is None or message.type not in BOOST_TYPES:
@@ -84,14 +82,14 @@ class Booster(commands.Cog):
 
         event = feature.event(message.guild.id, "boost")
 
+        if not event.get("enabled"):
+            return
+
         if event.get("replace_default", True):
             try:
                 await message.delete()
             except (discord.Forbidden, discord.NotFound):
                 pass
-
-        if not event.get("enabled"):
-            return
 
         member = message.guild.get_member(message.author.id) or message.author
         # fall back to the channel the boost happened in when none is set
@@ -109,7 +107,6 @@ class Booster(commands.Cog):
             event["channel_id"] = None
             feature.save()
 
-    # ---- command ------------------------------------------------------
     @commands.hybrid_command(name="booster", aliases=["boost"],
                              description="Set up the boost message.")
     @app_commands.default_permissions(manage_guild=True)

@@ -29,6 +29,7 @@ def defaults(kind):
             "image_url": None,
             "thumbnail": "avatar",
             "ping": True,
+            "replace_default": True,
         }
     return {
         "enabled": False,
@@ -75,6 +76,18 @@ class Welcome(commands.Cog):
         await feature.dispatch(member, member.guild, "join", count)
 
     @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.guild is None or message.type is not discord.MessageType.new_member:
+            return
+        event = feature.event(message.guild.id, "join")
+        if not event or not event.get("enabled") or not event.get("replace_default", True):
+            return
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+
+    @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         count = member.guild.member_count or len(member.guild.members)
         await feature.dispatch(member, member.guild, "leave", count)
@@ -94,7 +107,6 @@ class Welcome(commands.Cog):
         if changed:
             feature.save()
 
-    # ---- commands -----------------------------------------------------
     @commands.hybrid_command(name="welcome", aliases=["wel"],
                              description="Set up the welcome message.")
     @app_commands.default_permissions(manage_guild=True)
