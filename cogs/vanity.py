@@ -61,12 +61,17 @@ def custom_status(member: discord.Member) -> str:
     return ""
 
 
+def tag_guild_id(obj):
+    """The id of the guild whose server tag this user/member is displaying, or None."""
+    primary = getattr(obj, "primary_guild", None)
+    if primary is None or not getattr(primary, "identity_enabled", False):
+        return None
+    return getattr(primary, "id", None)
+
+
 def wearing_tag(member: discord.Member) -> bool:
     """True when the member is publicly displaying *this* server's tag."""
-    primary = getattr(member, "primary_guild", None)
-    if primary is None or not getattr(primary, "identity_enabled", False):
-        return False
-    return getattr(primary, "id", None) == member.guild.id
+    return tag_guild_id(member) == member.guild.id
 
 
 def _row(*items):
@@ -319,9 +324,6 @@ class Vanity(commands.Cog):
         wears_tag = tag_on and wearing_tag(member)
 
         if member.status is discord.Status.offline:
-            # A custom status can't be read while offline, so only the server
-            # tag can decide. When the status keyword is the only active method
-            # we leave offline members untouched (as before) rather than churn.
             if wears_tag:
                 should = True
             elif not status_on:
@@ -367,13 +369,18 @@ class Vanity(commands.Cog):
         await self.sync_member(after)
 
     @commands.Cog.listener()
-    async def on_member_update(self, before: discord.Member, after: discord.Member):
-        # Server tag changes arrive through GUILD_MEMBER_UPDATE; only act when
-        # the "wearing this server's tag" state actually flipped (this also
-        # keeps our own role edits from re-triggering a sync).
-        if wearing_tag(before) == wearing_tag(after):
+    async def on_user_update(self, before: discord.User, after: discord.User):
+        if tag_guild_id(before) == tag_guild_id(after):
             return
-        await self.sync_member(after)
+        for guild_id, cfg in list(config.items()):
+            if not cfg.get("enabled") or not cfg.get("tag", True) or not cfg.get("role_id"):
+                continue
+            guild = self.bot.get_guild(int(guild_id))
+            if guild is None:
+                continue
+            member = guild.get_member(after.id)
+            if member is not None:
+                await self.sync_member(member)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
