@@ -55,8 +55,6 @@ feature = Feature(
 
 
 class Welcome(commands.Cog):
-    """Greet joiners and announce leavers."""
-
     def __init__(self, bot):
         self.bot = bot
 
@@ -67,25 +65,12 @@ class Welcome(commands.Cog):
             return True
         raise commands.MissingPermissions(["manage_guild"])
 
-    # ---- events -------------------------------------------------------
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
         if member.bot:
             return
         count = member.guild.member_count or len(member.guild.members)
         await feature.dispatch(member, member.guild, "join", count)
-
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.guild is None or message.type is not discord.MessageType.new_member:
-            return
-        event = feature.event(message.guild.id, "join")
-        if not event or not event.get("enabled") or not event.get("replace_default", True):
-            return
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
