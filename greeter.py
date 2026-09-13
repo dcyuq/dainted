@@ -1,42 +1,17 @@
-"""
-Panel engine shared by the welcome and booster cogs.
-
-Both are "send a configurable message when something happens". A guild sets
-one message per event (welcome has join/leave, booster has boost) and edits it
-through a single button panel - a Components V2 container split by the grey
-separator line, with the controls underneath. No scattered subcommands.
-
-A cog builds a Feature (its store, its events, its defaults) and opens a
-SetupPanel. Everything else lives here.
-"""
-
 from __future__ import annotations
-
 import re
-
 import discord
-
 import embeds
 
-try:  # optional - also turns :tada: style unicode shortcodes into 🎉
+try:
     import emoji as _emoji_lib
-except ImportError:  # custom server emoji still work without it
+except ImportError:
     _emoji_lib = None
 
 ACCENT = embeds.ACCENT.value
-
 _EMOJI_NAME = re.compile(r":([a-zA-Z0-9_]{2,32}):")
 
-
 def resolve_emojis(text, guild):
-    """Turn :name: shortcodes into things Discord actually renders.
-
-    A bot must send a custom emoji as <:name:id> - the bare :name: form only
-    works when a human types it in the client, otherwise it shows literally.
-    We look the name up in the guild's emoji (animated ones included), then,
-    if the optional `emoji` package is installed, fall back to standard
-    unicode shortcodes like :tada: -> 🎉.
-    """
     if not text or ":" not in text:
         return text
 
@@ -79,11 +54,9 @@ BASE_PLACEHOLDERS = [
     ("{server_icon}", "the server icon - image fields only"),
 ]
 
-
 def can_manage(member: discord.Member) -> bool:
     perms = member.guild_permissions
     return perms.administrator or perms.manage_guild
-
 
 def parse_color(text, fallback):
     if not text:
@@ -94,7 +67,6 @@ def parse_color(text, fallback):
     except ValueError:
         return fallback
     return value if 0 <= value <= 0xFFFFFF else fallback
-
 
 def clean_url(text):
     if not text:
@@ -109,7 +81,6 @@ def clean_url(text):
         return value
     return None
 
-
 def _asset_label(value):
     if not value:
         return "none"
@@ -119,37 +90,24 @@ def _asset_label(value):
         return "server icon"
     return "custom url"
 
-
 class _PlainMessage(discord.ui.LayoutView):
-    """A no-embed message sent as a Components V2 text block.
-
-    Unlike raw message content, a text display renders markdown links -
-    [label](https://...) - so plain-text mode still gets clickable links.
-    Mentions inside it still ping when allowed_mentions permits.
-    """
-
     def __init__(self, text):
         super().__init__(timeout=None)
         self.add_item(discord.ui.TextDisplay(text))
 
-
 class Feature:
-    """One configurable message feature, backed by a storage.Store."""
-
-    def __init__(self, *, key, label, store, events, defaults,
-                 extra_toggles=(), token_extra=None, extra_placeholders=()):
+    def __init__(self, *, key, label, store, events, defaults, extra_toggles=(), token_extra=None, extra_placeholders=()):
         self.key = key
         self.label = label
         self.store = store
         self.settings = store.load()
-        self.events = list(events)              # [(kind, label, blurb)]
-        self._defaults = defaults               # kind -> dict
-        self.extra_toggles = list(extra_toggles)  # [(field, label, on, off)]
-        self.token_extra = token_extra          # (member, guild) -> dict
+        self.events = list(events)
+        self._defaults = defaults
+        self.extra_toggles = list(extra_toggles)
+        self.token_extra = token_extra
         self.placeholders = list(BASE_PLACEHOLDERS) + list(extra_placeholders)
         self.accent = ACCENT
 
-    # ---- persistence --------------------------------------------------
     def save(self):
         self.store.save(self.settings)
 
@@ -174,7 +132,6 @@ class Feature:
         self.ensure(guild_id)[kind] = self.defaults(kind)
         self.save()
 
-    # ---- rendering ----------------------------------------------------
     def tokens(self, member, guild, count):
         data = {
             "mention": member.mention,
@@ -206,12 +163,6 @@ class Feature:
         return value
 
     def build_payload(self, event, member, guild, count):
-        """Return (content, embed, view). Exactly one delivery shape is set.
-
-        Text mode goes out as a Components V2 text block rather than raw
-        content, so masked links like [label](https://...) render instead of
-        showing their brackets. Embed descriptions render them already.
-        """
         content = self.render(event.get("content", ""), member, guild, count)
         mode = event.get("mode", "embed_plain")
 
@@ -283,8 +234,6 @@ class Feature:
         except (discord.Forbidden, discord.HTTPException):
             pass
 
-
-# ---- selects ----------------------------------------------------------
 class EventSelect(discord.ui.Select):
     def __init__(self, panel):
         self.panel = panel
@@ -303,7 +252,6 @@ class EventSelect(discord.ui.Select):
         self.panel.kind = self.values[0]
         await self.panel.refresh(interaction)
 
-
 class ChannelSelect(discord.ui.ChannelSelect):
     def __init__(self, panel):
         self.panel = panel
@@ -315,7 +263,6 @@ class ChannelSelect(discord.ui.ChannelSelect):
     async def callback(self, interaction):
         self.panel.event["channel_id"] = self.values[0].id
         await self.panel.refresh(interaction)
-
 
 class ModeSelect(discord.ui.Select):
     def __init__(self, panel):
@@ -335,13 +282,11 @@ class ModeSelect(discord.ui.Select):
         self.panel.event["mode"] = self.values[0]
         await self.panel.refresh(interaction)
 
-
 def _row(*items):
     row = discord.ui.ActionRow()
     for item in items:
         row.add_item(item)
     return row
-
 
 class EditRow(discord.ui.ActionRow):
     def __init__(self, panel):
@@ -356,9 +301,7 @@ class EditRow(discord.ui.ActionRow):
     async def images(self, interaction, button):
         if self.panel.event.get("mode") == "text":
             await interaction.response.send_message(
-                embed=embeds.notice(
-                    "plain text has no thumbnail or image - switch to an embed style first."
-                ),
+                embed=embeds.notice("plain text has no thumbnail or image - switch to an embed style first."),
                 ephemeral=True,
             )
             return
@@ -367,14 +310,11 @@ class EditRow(discord.ui.ActionRow):
     @discord.ui.button(label="Options", style=discord.ButtonStyle.secondary)
     async def options(self, interaction, button):
         view = OptionsView(self.panel)
-        await interaction.response.send_message(
-            view.blurb(), view=view, ephemeral=True
-        )
+        await interaction.response.send_message(view.blurb(), view=view, ephemeral=True)
 
     @discord.ui.button(label="Preview", style=discord.ButtonStyle.secondary)
     async def preview(self, interaction, button):
         await self.panel.preview(interaction)
-
 
 class PowerRow(discord.ui.ActionRow):
     def __init__(self, panel):
@@ -406,7 +346,6 @@ class PowerRow(discord.ui.ActionRow):
     async def reset(self, interaction, button):
         self.panel.feature.reset(self.panel.guild.id, self.panel.kind)
         await self.panel.refresh(interaction)
-
 
 class MessageModal(discord.ui.Modal):
     def __init__(self, panel):
@@ -445,7 +384,6 @@ class MessageModal(discord.ui.Modal):
         await interaction.response.defer()
         await self.panel.refresh()
 
-
 class StyleModal(discord.ui.Modal):
     def __init__(self, panel):
         super().__init__(title="Thumbnail, image & colour")
@@ -476,20 +414,16 @@ class StyleModal(discord.ui.Modal):
 
     async def on_submit(self, interaction):
         event = self.panel.event
-
         thumb = self.f_thumb.value.strip()
         event["thumbnail"] = None if thumb.lower() in {"", "none", "off"} else clean_url(thumb)
-
         image = self.f_image.value.strip()
         event["image_url"] = None if image.lower() in {"", "none", "off"} else clean_url(image)
-
         raw = self.f_color.value.strip()
         if raw.lower() in {"", "none", "default"}:
             event["color"] = None
         else:
             current = event["color"] if event.get("color") is not None else self.panel.feature.accent
             event["color"] = parse_color(raw, current)
-
         await interaction.response.defer()
         await self.panel.refresh()
 
@@ -497,7 +431,6 @@ class OptionsView(discord.ui.View):
     def __init__(self, panel):
         super().__init__(timeout=300)
         self.panel = panel
-
         self.add_item(_ToggleButton("ping", "Ping", "notifies them", "silent"))
         for field, label, on, off in panel.feature.extra_toggles:
             self.add_item(_ToggleButton(field, label, on, off))
@@ -513,7 +446,6 @@ class OptionsView(discord.ui.View):
             lines.append(f"**{label}** — {on if event.get(field) else off}")
         return "\n".join(lines)
 
-
 class _ToggleButton(discord.ui.Button):
     def __init__(self, field, label, on_text, off_text):
         super().__init__(label=f"Toggle {label}", style=discord.ButtonStyle.secondary)
@@ -526,7 +458,6 @@ class _ToggleButton(discord.ui.Button):
         view.panel.feature.save()
         await view.panel.refresh()
         await interaction.response.edit_message(content=view.blurb(), view=view)
-
 
 class SetupPanel(discord.ui.LayoutView):
     def __init__(self, feature, guild, author_id, kind, message=None):
@@ -572,13 +503,11 @@ class SetupPanel(discord.ui.LayoutView):
         self.clear_items()
         event = self.event
         accent = event["color"] if event.get("color") is not None else self.feature.accent
-
         container = discord.ui.Container(accent_colour=accent)
         container.add_item(discord.ui.TextDisplay(f"## {self.feature.label} setup"))
         container.add_item(discord.ui.TextDisplay(self._summary(event)))
         container.add_item(discord.ui.Separator())
         container.add_item(discord.ui.TextDisplay(self._message_block(event)))
-
         problems = self.feature.problems(event, self.guild)
         container.add_item(discord.ui.Separator())
         if problems:
@@ -650,7 +579,6 @@ class SetupPanel(discord.ui.LayoutView):
         embed = embeds.build(body, title=f"{self.feature.label} placeholders")
         embed.set_footer(text="a {mention} inside an embed won't notify - put it above the embed.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
 
 async def open_panel(ctx, feature, kind):
     feature.ensure(ctx.guild.id)
